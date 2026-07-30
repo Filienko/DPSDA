@@ -177,3 +177,61 @@ python example/tabular/dist_shift/plot_natural.py
 - **True FM-mismatch scenario** (private = data the foundation model never saw; initial
   generator from a different distribution) needs an **algorithm change**, not just
   analysis — Exp D is the tractable stand-in only.
+
+---
+
+## 6. Open: the count attack reads the wrong cell set (`attacks/strong_mia.py`)
+
+**Every number above is from an attack that reconstructs the nearest-neighbour
+assignment against the wrong candidate set**, so all of them are lower bounds and
+finding E may be an artifact. Round `t` votes on **all** rows of checkpoint `t-1`
+(`pe/runner/pe.py:203-207`), but top-k selection keeps ~1 in 4
+(`pe/population/pe_population.py:129-134`) and only survivors retain the histogram
+and embedding columns — so `reconstruct.py:91` recovers survivors only. A record
+that voted for a cell which did not survive gets scored against an unrelated,
+more popular, more distant cell, and `cell_occupancy` renormalises `q` over the
+survivors, inflating `mu0 = N*q_j` about fourfold. The `dispersion=1.8` /
+`soft_tau=0.02` / `ref_alpha=0.05` tuning is compensating for that, not for a
+property of the data.
+
+Three further channels are released and unread: the **censoring** fact `y_j < tau`
+for non-survivors; the **child multiplicity** in the `selection_mode="sample"`
+rounds 1–4, which is a multinomial readout of a histogram those checkpoints never
+persist (~36% of the budget, currently zero signal); and the **ancestry graph**
+(`PE.PARENT_SYN_DATA_INDEX` is an exact row index into the previous checkpoint).
+
+`attacks/strong_mia.py` is a new self-contained attack that fixes the pool and adds
+all three as additive log-likelihood ratios, plus per-example calibration and the
+count-vs-geometry router §5 asks for. Nothing existing is modified.
+
+**Status: validated on a simulation of the PE loop, not yet on a real run.** On a
+simulation reproducing the loop exactly at `sigma=1.84` with `mu0~1.7` (which
+reproduces the survivor-only baseline's AUC):
+
+| attack | AUC |
+|---|---|
+| survivor-only count (= the attack used above) | 0.559 |
+| full pool, count | 0.642 |
+| + censored | 0.661 |
+| + multiplicity (rounds 1–4) | **0.667** |
+| + geometry, flat / router fusion | 0.645 / 0.662 |
+
+The geometry channel is real alone (0.573, and it reads records the count channel
+cannot) but does not add on top of a correctly specified count channel, so it is
+off by default. `python -m attacks.strong_mia_simtest` reproduces all of this with no
+data and no PE run.
+
+**To do on the VM, in order:**
+
+1. `python -m attacks.strong_mia --run_dir <run> ... --self_test` — recomputes the
+   clean histogram over the reconstructed pool and checks it against
+   `PE.CLEAN_HISTOGRAM` cell-for-cell. Passes only on the full pool; fails by
+   construction on the survivor-only pool. This is the proof the defect is real.
+2. `--compare_baseline` on artificial-characters ε=10 for the before/after on one
+   audit set (baseline should reproduce ~0.63).
+3. `--per_group` to re-test finding E. Prediction: per-round SNR of the +1 vote is
+   `1/sqrt(sigma^2 + phi*N*q_j)`, largest where `q_j` is small, so **outlier AUC
+   should rise and may exceed inlier AUC**. If it does, E is a property of the
+   attack's cell-set truncation, not of PE, and §2E/§3.4 need restating.
+4. Seed-average (≥5) before claiming anything; report TPR@1%FPR — TPR@0.1% is below
+   resolution at 1500 non-members.
