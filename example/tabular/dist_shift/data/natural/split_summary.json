@@ -1,0 +1,60 @@
+{
+  "n_mem": 1500,
+  "n_aux": 1500,
+  "pca1_loadings": {
+    "V1": 0.2904,
+    "V2": 0.1704,
+    "V3": 0.5313,
+    "V4": 0.3723,
+    "V5": 0.4145,
+    "V6": 0.2075,
+    "V7": 0.5008
+  },
+  "variants": {
+    "iid": {
+      "band_frac": null,
+      "n_members": 1501,
+      "n_aux": 1501,
+      "mean_embedding_gap": 0.0148,
+      "pca1_wasserstein": 0.0527,
+      "members_pca1_mean": 0.0173,
+      "aux_pca1_mean": 0.0208
+    },
+    "q50": {
+      "band_frac": 0.5,
+      "n_members": 1500,
+      "n_aux": 1500,
+      "mean_embedding_gap": 0.4205,
+      "pca1_wasserstein": 2.0542,
+      "members_pca1_mean": -1.0337,
+      "aux_pca1_mean": 1.0205
+    },
+    "q35": {
+      "band_frac": 0.35,
+      "n_members": 1500,
+      "n_aux": 1500,
+      "mean_embedding_gap": 0.5671,
+      "pca1_wasserstein": 2.7676,
+      "members_pca1_mean": -1.3336,
+      "aux_pca1_mean": 1.434
+    },
+    "q25": {
+      "band_frac": 0.25,
+      "n_members": 1502,
+      "n_aux": 1502,
+      "mean_embedding_gap": 0.6774,
+      "pca1_wasserstein": 3.2938,
+      "members_pca1_mean": -1.5469,
+      "aux_pca1_mean": 1.7469
+    },
+    "q18": {
+      "band_frac": 0.18,
+      "n_members": 1501,
+      "n_aux": 1501,
+      "mean_embedding_gap": 0.7747,
+      "pca1_wasserstein": 3.7694,
+      "members_pca1_mean": -1.7104,
+      "aux_pca1_mean": 2.059
+    }
+  }
+}

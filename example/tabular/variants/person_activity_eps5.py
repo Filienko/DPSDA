@@ -23,7 +23,7 @@ import numpy as np
 pd.options.mode.copy_on_write = True
 
 if __name__ == "__main__":
-    exp_folder = "results/tabular/person-activity_composite_population"
+    exp_folder = "results/tabular/person-activity_composite_population_eps5"
     current_folder = os.path.dirname(os.path.abspath(__file__))
 
     load_dotenv()
@@ -121,6 +121,6 @@ if __name__ == "__main__":
     pe_runner.run(
         num_samples_schedule=[5000] * num_iterations,
         delta=delta,
-        epsilon=10.0,
+        epsilon=5.0,
         checkpoint_path=os.path.join(exp_folder, "checkpoint"),
     )

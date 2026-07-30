@@ -1,3 +1,10 @@
+"""Small smoke test for the tabular generator.
+
+Uses the breast-cancer dataset (smallest of the examples) but scaled way down:
+few iterations and few samples, with only the lightweight callbacks. The goal
+is to confirm the end-to-end pipeline runs, not to produce high-quality data.
+"""
+
 from dotenv import load_dotenv
 
 from pe.data import TabularCSV
@@ -10,7 +17,6 @@ from pe.embedding import TabularEmbedding
 from pe.histogram import NearestNeighbors
 from pe.callback import SaveCheckpoints
 from pe.callback import ComputeFID
-from pe.callback import TabClassifier
 from pe.callback import SaveTabToCSV
 from pe.callback import ComputeTVD
 from pe.logger import CSVPrint
@@ -23,29 +29,24 @@ import numpy as np
 pd.options.mode.copy_on_write = True
 
 if __name__ == "__main__":
-    exp_folder = "results/tabular/person-activity_composite_population"
-    current_folder = os.path.dirname(os.path.abspath(__file__))
+    exp_folder = "results/tabular/smoke_test"
 
     load_dotenv()
 
     setup_logging(log_file=os.path.join(exp_folder, "log.txt"))
 
+    base_url = (
+        "https://raw.githubusercontent.com/toan-vt/cloud-data-store/refs/heads/main/tabular/"
+    )
     priv_data = TabularCSV(
-        csv_path="https://raw.githubusercontent.com/toan-vt/cloud-data-store/refs/"
-        "heads/main/tabular/person-activity_train.csv",
-        metadata_path="https://raw.githubusercontent.com/toan-vt/cloud-data-store/refs/"
-        "heads/main/tabular/person-activity_metadata.json",
+        csv_path=base_url + "breast-cancer_train.csv",
+        metadata_path=base_url + "breast-cancer_metadata.json",
     )
     priv_info = priv_data.get_tab_info()
 
-    test_data = TabularCSV(
-        csv_path="https://raw.githubusercontent.com/toan-vt/cloud-data-store/refs/"
-        "heads/main/tabular/person-activity_test.csv",
-        metadata_path="https://raw.githubusercontent.com/toan-vt/cloud-data-store/refs/"
-        "heads/main/tabular/person-activity_metadata.json",
-    )
-
-    num_iterations = 15
+    # Small smoke-test configuration.
+    num_iterations = 3
+    num_samples = 50
 
     api = TabularAPI(
         info=priv_info,
@@ -73,26 +74,19 @@ if __name__ == "__main__":
     population2 = PEPopulation(
         api=api, initial_variation_api_fold=3, next_variation_api_fold=3, keep_selected=True, selection_mode="rank"
     )
-    population = CompositePopulation(populations=[population1] * 5 + [population2] * (num_iterations - 5))
+    population = CompositePopulation(populations=[population1] * 1 + [population2] * (num_iterations - 1))
 
     save_checkpoints = SaveCheckpoints(os.path.join(exp_folder, "checkpoint"))
     compute_fid = ComputeFID(
         priv_data=priv_data, embedding=embedding, filter_criterion={VARIATION_API_FOLD_ID_COLUMN_NAME: -1}
     )
-    compute_fid_no_filter = ComputeFID(priv_data=priv_data, embedding=embedding, filter_criterion=None)
-    tab_classifier = TabClassifier(
-        test_data=test_data, model_name="tabicl", filter_criterion={VARIATION_API_FOLD_ID_COLUMN_NAME: -1}
-    )
-    tab_classifier_no_filter = TabClassifier(test_data=test_data, model_name="tabicl", filter_criterion=None)
     save_tab_to_csv = SaveTabToCSV(output_folder=os.path.join(exp_folder, "synthetic_tab"))
     compute_tvd_1way = ComputeTVD(
         priv_data=priv_data, degree=1, filter_criterion={VARIATION_API_FOLD_ID_COLUMN_NAME: -1}
     )
-    compute_tvd_1way_no_filter = ComputeTVD(priv_data=priv_data, degree=1, filter_criterion=None)
     compute_tvd_2way = ComputeTVD(
         priv_data=priv_data, degree=2, filter_criterion={VARIATION_API_FOLD_ID_COLUMN_NAME: -1}
     )
-    compute_tvd_2way_no_filter = ComputeTVD(priv_data=priv_data, degree=2, filter_criterion=None)
 
     csv_print = CSVPrint(output_folder=exp_folder)
     log_print = LogPrint()
@@ -108,19 +102,15 @@ if __name__ == "__main__":
             save_checkpoints,
             save_tab_to_csv,
             compute_fid,
-            tab_classifier,
             compute_tvd_1way,
             compute_tvd_2way,
-            compute_fid_no_filter,
-            tab_classifier_no_filter,
-            compute_tvd_1way_no_filter,
-            compute_tvd_2way_no_filter,
         ],
         loggers=[csv_print, log_print],
     )
     pe_runner.run(
-        num_samples_schedule=[5000] * num_iterations,
+        num_samples_schedule=[num_samples] * num_iterations,
         delta=delta,
-        epsilon=10.0,
+        epsilon=1.0,
         checkpoint_path=os.path.join(exp_folder, "checkpoint"),
     )
+    print("SMOKE TEST DONE")

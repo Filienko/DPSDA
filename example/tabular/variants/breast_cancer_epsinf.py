@@ -23,7 +23,7 @@ import numpy as np
 pd.options.mode.copy_on_write = True
 
 if __name__ == "__main__":
-    exp_folder = "results/tabular/person-activity_composite_population"
+    exp_folder = "results/tabular/breast-cancer_composite_population_nonoise"
     current_folder = os.path.dirname(os.path.abspath(__file__))
 
     load_dotenv()
@@ -32,20 +32,20 @@ if __name__ == "__main__":
 
     priv_data = TabularCSV(
         csv_path="https://raw.githubusercontent.com/toan-vt/cloud-data-store/refs/"
-        "heads/main/tabular/person-activity_train.csv",
+        "heads/main/tabular/breast-cancer_train.csv",
         metadata_path="https://raw.githubusercontent.com/toan-vt/cloud-data-store/refs/"
-        "heads/main/tabular/person-activity_metadata.json",
+        "heads/main/tabular/breast-cancer_metadata.json",
     )
     priv_info = priv_data.get_tab_info()
 
     test_data = TabularCSV(
         csv_path="https://raw.githubusercontent.com/toan-vt/cloud-data-store/refs/"
-        "heads/main/tabular/person-activity_test.csv",
+        "heads/main/tabular/breast-cancer_test.csv",
         metadata_path="https://raw.githubusercontent.com/toan-vt/cloud-data-store/refs/"
-        "heads/main/tabular/person-activity_metadata.json",
+        "heads/main/tabular/breast-cancer_metadata.json",
     )
 
-    num_iterations = 15
+    num_iterations = 20
 
     api = TabularAPI(
         info=priv_info,
@@ -119,8 +119,9 @@ if __name__ == "__main__":
         loggers=[csv_print, log_print],
     )
     pe_runner.run(
-        num_samples_schedule=[5000] * num_iterations,
+        num_samples_schedule=[150] * num_iterations,
         delta=delta,
-        epsilon=10.0,
+        epsilon=None,
+        noise_multiplier=0,
         checkpoint_path=os.path.join(exp_folder, "checkpoint"),
     )

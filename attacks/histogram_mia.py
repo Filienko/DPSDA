@@ -39,6 +39,83 @@ def _count_logpmf(k, mean, dispersion=1.0):
     return nbinom.logpmf(k, n, p)
 
 
+def estimate_dispersion(counts, mu0, sigma=0.0, method="auto", cap=8.0,
+                        min_cells=8, n_bins=8):
+    """Self-calibrating (method-of-moments) estimate of the null overdispersion
+    ``phi`` (``var = phi*mean``) from ONE round's observed per-cell counts and the
+    reference null means ``mu0 = N*q_j``.
+
+    ``method="auto"`` -- aggregate (mu-weighted) Pearson identity
+        E[ sum_j (c_j - mu_j)^2 ]  =  phi * sum_j mu_j  +  J * sigma^2
+    so  ``phi_hat = ( sum (c-mu)^2 - J*sigma^2 ) / sum mu``.  The ``J*sigma^2`` term
+    removes the Gaussian observation-noise variance in the noised regime (``sigma=0``
+    for the pure regime).  Aggregating numerator and denominator (rather than
+    averaging per-cell ratios ``(c-mu)^2/mu``) makes it stable in the sparse cells
+    where ``mu`` is tiny and a per-cell ratio would explode.  Wins on images/text
+    (aux ~= private, so ``mu0`` is well specified) but LOSES on tabular: there the
+    reference is a poor proxy for the private mean, and the squared residual
+    ``(c-mu)^2`` absorbs that MEAN MISSPECIFICATION as if it were overdispersion, so
+    ``phi`` pins at the cap and over-widens the null -> AUC drops.
+
+    ``method="robust"`` -- mu-stratified, MEDIAN-DEBIASED Pearson estimator.  Cells
+    are sorted into ``n_bins`` log-mu strata; in each band the residual ``c_j-mu_j``
+    is re-centred on its MEDIAN, which removes a shared/uniform mean misspecification
+    (exactly the tabular aux-vs-private gap) WITHOUT discarding the heavy upper tail
+    where genuine vote-clumping lives -- ``phi_band = (mean[centred_resid^2]-sigma^2)
+    /mubar``, bands mu-mass-weighted.  Unlike a pure MAD scale (which ignores the
+    tail and so collapses to Poisson on images, throwing away real overdispersion),
+    the mean-of-squares keeps the tail dispersion that ``auto`` finds on images
+    (well-specified mean) while refusing to launder a broad mean bias into
+    overdispersion on tabular.  Clipped to ``[1, cap]`` (NB needs ``phi >= 1``;
+    ``phi == 1`` -> Poisson).
+    """
+    c = np.asarray(counts, dtype=np.float64)
+    mu = np.asarray(mu0, dtype=np.float64)
+    mask = mu > 1e-9
+    n_used = int(mask.sum())
+    if n_used < min_cells:
+        return 1.0
+    c, mu = c[mask], mu[mask]
+
+    if method in ("robust", "muband"):
+        # Per-band de-biased Pearson dispersion over log-mu strata.
+        order = np.argsort(mu)
+        c_s, mu_s = c[order], mu[order]
+        edges = np.linspace(0, n_used, int(min(n_bins, max(1, n_used // min_cells))) + 1)
+        edges = np.unique(edges.astype(int))
+        centers, phis, weights = [], [], []
+        for lo, hi in zip(edges[:-1], edges[1:]):
+            if hi - lo < min_cells:
+                continue
+            resid = c_s[lo:hi] - mu_s[lo:hi]
+            resid = resid - np.median(resid)              # remove shared mean bias
+            var = float(np.mean(resid ** 2))              # keep heavy-tail dispersion
+            mubar = float(mu_s[lo:hi].mean())
+            phi_b = min(max((var - sigma ** 2) / max(mubar, 1e-9), 1.0), cap)
+            centers.append(np.log(max(mubar, 1e-9)))
+            phis.append(phi_b)
+            weights.append(mubar * (hi - lo))
+        if not phis:
+            return 1.0
+        if method == "muband":
+            # A mu-INDEXED dispersion curve phi(log mu): apply the (real) over-
+            # dispersion only in the high-mu popular cells, and keep phi~=1 in the
+            # sparse low-mu cells where the +1 self-vote is the crispest signal.
+            # Collapsing to one scalar (method="robust") mu-mass-weights toward the
+            # high-mu bands and then over-widens the low-mu signal cells -- which is
+            # exactly what regressed artificial-characters (real early-round over-
+            # dispersion is CONFOUNDED with the membership pile-up).
+            return (np.asarray(centers), np.asarray(phis))
+        # method="robust": collapse to one mu-mass-weighted scalar.
+        phi = float(np.dot(phis, weights) / sum(weights))
+    else:  # "auto": aggregate mu-weighted Pearson
+        den = float(mu.sum())
+        if den <= 0.0:
+            return 1.0
+        phi = (float(np.sum((c - mu) ** 2)) - n_used * (sigma ** 2)) / den
+    return float(min(max(phi, 1.0), cap))
+
+
 # --------------------------------------------------------------------------- #
 # Nearest-neighbor assignment (matches pe/histogram distance modes)
 # --------------------------------------------------------------------------- #
@@ -403,10 +480,37 @@ def llr_noised_vec(y, mu0, mu1, sigma, select_tau=None):
 # --------------------------------------------------------------------------- #
 # Per-record scoring across iterations
 # --------------------------------------------------------------------------- #
+def _nbr_loglik(counts_nbr, mu_nbr, sigma, threshold, regime, disp):
+    """Log-likelihood of the NEIGHBOUR cells' counts under the shared null.
+
+    With k=1 voting a member deposits its +1 into exactly ONE cell, so the 2nd..k-th
+    nearest cells are untouched by its membership: they are not extra vote sites (that
+    is ``gen_k``), they are extra EVIDENCE ABOUT THE NULL in the record's immediate
+    neighbourhood.  The single-cell LLR discards them -- it reads 1 number out of the
+    ~14k in each round's histogram -- yet a learned model given exactly these
+    neighbour counts beat the analytic LLR at low FPR, which says the local
+    neighbourhood is informative about whether ``mu0 = N*q_j`` is well specified here.
+
+    We use them as a local RECALIBRATION of the null: if the neighbourhood is
+    systematically busier than the reference predicts, then this record's own cell is
+    probably also busier for non-membership reasons, and its count should be discounted
+    accordingly.  Returns the multiplicative correction factor for mu0 (>1 = the
+    reference under-predicts local density here), clipped for stability.
+    """
+    obs = float(np.sum(counts_nbr))
+    exp = float(np.sum(mu_nbr))
+    if exp <= 1e-9:
+        return 1.0
+    # shrink toward 1 by the neighbourhood's own Poisson/NB noise level so a
+    # small/noisy neighbourhood does not swing the correction
+    w = exp / (exp + max(disp, 1.0) * max(len(np.atleast_1d(mu_nbr)), 1))
+    ratio = max(obs, 0.0) / exp
+    return float(np.clip(1.0 + w * (ratio - 1.0), 0.25, 4.0))
+
 def score_records(query_embeddings, iterations, mode="L2", regime="pure",
                   gen_k=1, sigma=0.0, threshold=0.0, ref_alpha=1.0,
                   censored=True, soft_tau=0.0, dispersion=1.0,
-                  occupancy_cache=None):
+                  occupancy_cache=None, nbr_k=0):
     """Score a batch of candidate records (one class) against all iterations.
 
     ``query_embeddings`` : ``(m, d)`` embeddings of the candidates being tested.
@@ -442,27 +546,55 @@ def score_records(query_embeddings, iterations, mode="L2", regime="pure",
                                k=gen_k, alpha=ref_alpha, soft_tau=soft_tau)
             if occupancy_cache is not None:
                 occupancy_cache[it_i] = q
+        # Resolve the null dispersion for this round.  ``dispersion="auto"``
+        # self-calibrates it from this round's own counts vs the null mean
+        # ``mu0 = N*q`` (see ``estimate_dispersion``); a float is used as-is.
+        # Cached per round under a tuple key so it survives the rounds ablation
+        # without clashing with the int-keyed occupancy entries.
+        if isinstance(dispersion, str):
+            disp = None if occupancy_cache is None else occupancy_cache.get(("disp", it_i))
+            if disp is None:
+                disp = estimate_dispersion(
+                    counts, N * q, sigma=sigma if regime == "noised" else 0.0,
+                    method=dispersion)
+                if occupancy_cache is not None:
+                    occupancy_cache[("disp", it_i)] = disp
+        else:
+            disp = dispersion
+        # ``dispersion="muband"`` yields a mu-INDEXED curve (log-mu centres, phi):
+        # each cell's dispersion is read off phi(log mu0_j) so the sparse low-mu
+        # signal cells keep phi~=1 while only the popular high-mu cells are widened.
+        disp_curve = disp if isinstance(disp, tuple) else None
         # With k-NN voting (gen_k>1) a member casts its +1 into EACH of its gen_k
         # nearest cells, so read all of them: the per-record LLR is the sum over
         # those cells, and an empty cell among them is still a non-membership
         # certificate.  gen_k==1 reduces exactly to the single-cell scorer.
-        cells = nearest_cell(query_embeddings, F, mode=mode, k=gen_k)
-        if gen_k == 1:
+        k_read = min(gen_k + max(nbr_k, 0), F.shape[0])
+        cells = nearest_cell(query_embeddings, F, mode=mode, k=k_read)
+        counts_arr = np.asarray(counts, dtype=np.float64)
+        if k_read == 1:
             cells = cells[:, None]
         for r in range(m):
             if total[r] == NEG_INF:
                 continue
             ell_sum = 0.0
             certified = False
-            for j in cells[r]:
-                mu0 = N * q[j]
-                mu1 = (N - 1) * q[j]
+            corr = 1.0
+            if nbr_k > 0 and k_read > gen_k:
+                nb = cells[r][gen_k:k_read]
+                corr = _nbr_loglik(counts_arr[nb], N * q[nb], sigma, threshold,
+                                   regime, disp if not isinstance(disp, tuple) else 1.8)
+            for j in cells[r][:gen_k]:
+                mu0 = N * q[j] * corr
+                mu1 = (N - 1) * q[j] * corr
+                d = disp if disp_curve is None else float(
+                    np.interp(np.log(max(mu0, 1e-9)), disp_curve[0], disp_curve[1]))
                 if regime == "pure":
-                    ell = llr_pure(counts[j], mu0, mu1, dispersion=dispersion)
+                    ell = llr_pure(counts[j], mu0, mu1, dispersion=d)
                 else:
                     ell = llr_noised(counts[j], mu0, mu1, sigma=sigma,
                                      threshold=threshold, censored=censored,
-                                     dispersion=dispersion)
+                                     dispersion=d)
                 if ell == NEG_INF:
                     certified = True
                     break

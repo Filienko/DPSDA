@@ -37,9 +37,17 @@ BC_BASE = ("https://raw.githubusercontent.com/toan-vt/cloud-data-store/refs/"
            "heads/main/tabular/")
 
 
+def _dispersion_arg(s):
+    """--dispersion accepts a float (fixed NB overdispersion), 'auto'
+    (self-calibrate per round via aggregate Pearson), 'robust' (mu-stratified
+    de-biased Pearson scalar) or 'muband' (mu-INDEXED de-biased Pearson curve:
+    widen only high-mu popular cells, keep phi~=1 in sparse signal cells)."""
+    return str(s).lower() if str(s).lower() in ("auto", "robust", "muband") else float(s)
+
+
 def _score_all(by_class, query_emb, classes, labels, mode, regime, sigma,
                threshold, censored, max_iters=None, caches=None, ref_alpha=1.0,
-               soft_tau=0.0, dispersion=1.0, gen_k=1):
+               soft_tau=0.0, dispersion=1.0, gen_k=1, nbr_k=0):
     """Score every audit record within its class; returns a score array."""
     classes = np.asarray(classes)
     scores = np.full(len(classes), np.nan)
@@ -57,7 +65,7 @@ def _score_all(by_class, query_emb, classes, labels, mode, regime, sigma,
             query_emb[mask], iters, mode=mode, regime=regime, gen_k=gen_k,
             sigma=sigma, threshold=threshold, censored=censored,
             ref_alpha=ref_alpha, soft_tau=soft_tau, dispersion=dispersion,
-            occupancy_cache=cache)
+            occupancy_cache=cache, nbr_k=nbr_k)
     # Records whose class never appeared get the lowest score (no evidence).
     finite = scores[np.isfinite(scores)]
     scores[np.isnan(scores)] = (finite.min() - 1.0) if finite.size else 0.0
@@ -134,15 +142,21 @@ def main():
     p.add_argument("--soft_tau", type=float, default=0.02,
                    help="Temperature for soft (kernel) reference binning of q_j; "
                         "0 = original hard nearest-cell histogram.")
-    p.add_argument("--dispersion", type=float, default=1.8,
+    p.add_argument("--dispersion", type=_dispersion_arg, default=1.8,
                    help="Null cell-count model: var = dispersion*mean. 1.0 = the "
                         "original Poisson null; ~1.8 (negative binomial) fixes the "
-                        "low-FPR calibration for overdispersed vote counts.")
+                        "low-FPR calibration for overdispersed vote counts. Pass "
+                        "'auto' to self-calibrate it per-round from each round's "
+                        "own counts (removes the text-tuned global constant).")
     p.add_argument("--count_threshold", type=float, default=0.0)
     p.add_argument("--n_members", type=int, default=500)
     p.add_argument("--n_nonmembers", type=int, default=500)
     p.add_argument("--max_iters", type=int, default=0, help="0 = all iterations")
     p.add_argument("--ref_max_per_class", type=int, default=2000)
+    p.add_argument("--nbr_k", type=int, default=0,
+                   help="extra nearest cells used to recalibrate mu0 locally "
+                        "from membership-blind neighbour counts (4 works best "
+                        "on text; 0 = original single-cell behaviour).")
     p.add_argument("--start_t", type=int, default=1)
     p.add_argument("--use_lineage", action="store_true",
                    help="also score the geometric survivor-proximity (lineage) "
@@ -232,10 +246,20 @@ def main():
                             regime, sigma, args.count_threshold, censored,
                             caches=caches, ref_alpha=args.ref_alpha,
                             soft_tau=args.soft_tau, dispersion=args.dispersion,
-                            gen_k=args.num_nearest_neighbor)
+                            gen_k=args.num_nearest_neighbor, nbr_k=args.nbr_k)
         m = evaluate(labels, scores)
         print("\n" + format_report(m, title=f"regime={regime} (all rounds)"))
         report["regimes"][regime] = {"all_rounds": m, "ablation": {}}
+        if args.dispersion in ("auto", "robust", "muband"):
+            def _fmt(v):  # scalar phi, or (log-mu centres, phi) curve for muband
+                if isinstance(v, tuple):
+                    return [round(x, 2) for x in v[1]]
+                return round(v, 3)
+            disp_by_class = {c: {k[1]: _fmt(v) for k, v in cache.items()
+                                 if isinstance(k, tuple) and k[0] == "disp"}
+                             for c, cache in caches.items()}
+            report["regimes"][regime]["auto_dispersion"] = disp_by_class
+            print(f"  dispersion phi per class/round: {disp_by_class}")
 
         # Lineage / survivor-geometry signal: score it on its own and combined
         # (z-scored sum) with the count LLR. Only meaningful for the released
@@ -264,7 +288,7 @@ def main():
                            regime, sigma, args.count_threshold, censored,
                            max_iters=T, caches=caches, ref_alpha=args.ref_alpha,
                            soft_tau=args.soft_tau, dispersion=args.dispersion,
-                           gen_k=args.num_nearest_neighbor)
+                           gen_k=args.num_nearest_neighbor, nbr_k=args.nbr_k)
             mt = evaluate(labels, sc)
             report["regimes"][regime]["ablation"][T] = {
                 "auc": mt["auc"], "tpr@fpr=0.01": mt["tpr@fpr=0.01"]}
