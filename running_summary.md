@@ -180,58 +180,119 @@ python example/tabular/dist_shift/plot_natural.py
 
 ---
 
-## 6. Open: the count attack reads the wrong cell set (`attacks/strong_mia.py`)
+## 6. The count attack reads the wrong cell set (measured on real runs)
 
-**Every number above is from an attack that reconstructs the nearest-neighbour
-assignment against the wrong candidate set**, so all of them are lower bounds and
-finding E may be an artifact. Round `t` votes on **all** rows of checkpoint `t-1`
-(`pe/runner/pe.py:203-207`), but top-k selection keeps ~1 in 4
-(`pe/population/pe_population.py:129-134`) and only survivors retain the histogram
-and embedding columns — so `reconstruct.py:91` recovers survivors only. A record
-that voted for a cell which did not survive gets scored against an unrelated,
-more popular, more distant cell, and `cell_occupancy` renormalises `q` over the
-survivors, inflating `mu0 = N*q_j` about fourfold. The `dispersion=1.8` /
+**Every number in §2 is a lower bound, and the reason is mechanical.** Round `t`
+votes on **all** rows of checkpoint `t-1` (`pe/runner/pe.py:203-207`), but top-k
+selection keeps ~1 in 4 (`pe/population/pe_population.py:129-134`) and only
+survivors retain the histogram and embedding columns, so `reconstruct.py:91`
+recovers survivors only. A record whose cell did not survive is scored against an
+unrelated, more popular, more distant cell, and `cell_occupancy` renormalises `q`
+over the survivors, inflating `mu0 = N*q_j` about fourfold. The `dispersion=1.8` /
 `soft_tau=0.02` / `ref_alpha=0.05` tuning is compensating for that, not for a
 property of the data.
 
+**How wrong.** Reassign the private records to their nearest cell over each pool
+and compare against the released `PE.CLEAN_HISTOGRAM` (`--self_test`). Fraction of
+private votes landing in the wrong cell:
+
+| dataset | full pool | survivor-only (what §2 used) |
+|---|---|---|
+| artificial-characters (4 seeds) | 0 – 1.2e-4 | **0.33 – 0.36** |
+| breast-cancer | 0 | **0.13** |
+| adult | 1.4e-5 | **0.18** |
+| person-activity | 1.2e-5 | **0.35** |
+
+The full-pool residual is nearest-neighbour tie-breaking (on adult, 0.1% of rows
+have a NN gap below 1e-5), not a structural error. The baseline misplaces **13-36%
+of the entire vote mass**.
+
 Three further channels are released and unread: the **censoring** fact `y_j < tau`
 for non-survivors; the **child multiplicity** in the `selection_mode="sample"`
-rounds 1–4, which is a multinomial readout of a histogram those checkpoints never
-persist (~36% of the budget, currently zero signal); and the **ancestry graph**
+rounds 1-4, a multinomial readout of a histogram those checkpoints never persist
+(~36% of the budget, currently zero signal); and the **ancestry graph**
 (`PE.PARENT_SYN_DATA_INDEX` is an exact row index into the previous checkpoint).
 
-`attacks/strong_mia.py` is a new self-contained attack that fixes the pool and adds
-all three as additive log-likelihood ratios, plus per-example calibration and the
-count-vs-geometry router §5 asks for. Nothing existing is modified.
+### What to run
 
-**Status: validated on a simulation of the PE loop, not yet on a real run.** On a
-simulation reproducing the loop exactly at `sigma=1.84` with `mu0~1.7` (which
-reproduces the survivor-only baseline's AUC):
+```bash
+python -m attacks.run_pe_for_attack --dataset artificial-characters --inout_split
+python -m attacks.strong_mia --run_dir <run> --train_csv <run>/audit_members.csv \
+       --test_csv <run>/audit_nonmembers.csv --metadata <meta> --self_test
+python -m attacks.strong_mia_sweep --runs <run> ... --metadata <meta> ...
+```
 
-| attack | AUC |
+`attacks/strong_mia.py` is the new attack (nothing existing modified);
+`attacks/run_pe_for_attack.py` generates runs; `attacks/strong_mia_sweep.py`
+regenerates `attacks/strong_mia_results.json`, from which every number below comes.
+`python -m attacks.strong_mia_simtest` checks the machinery with no data at all.
+
+**Note: the dataset store moved.** `tabular/<slug>_train.csv` now 404s; the live
+path is `tabular/real/<slug>/<slug>_train.csv`. Every script under
+`example/tabular/` (including all 32 in `variants/`) still points at the dead one
+and needs a one-line fix; `make_shift_data.py` is the only one already correct.
+
+### Results (eps=10, in/out split -- see below)
+
+AUC, and the delta over the §2 attack scored on the identical audit set:
+
+| dataset | baseline | strong | delta |
+|---|---|---|---|
+| artificial-characters (4 seeds) | 0.578 +- 0.013 | **0.672 +- 0.002** | **+0.095 +- 0.014** |
+| breast-cancer | 0.588 | 0.603 | +0.015 |
+| adult | 0.546 | 0.567 | +0.021 |
+| person-activity | 0.518 | 0.532 | +0.014 |
+
+TPR@1%FPR on artificial-characters rises 0.021 -> 0.031. Channel attribution
+(artificial-characters, 4 seeds):
+
+| channels | AUC |
 |---|---|
-| survivor-only count (= the attack used above) | 0.559 |
-| full pool, count | 0.642 |
-| + censored | 0.661 |
-| + multiplicity (rounds 1–4) | **0.667** |
-| + geometry, flat / router fusion | 0.645 / 0.662 |
+| baseline (survivor-only pool) | 0.5775 |
+| count — **the pool fix alone** | 0.6642 |
+| + censored | **0.6723** |
+| + multiplicity | 0.6719 |
+| geometry alone | 0.5443 |
+| all four | 0.6639 |
 
-The geometry channel is real alone (0.573, and it reads records the count channel
-cannot) but does not add on top of a correctly specified count channel, so it is
-off by default. `python -m attacks.strong_mia_simtest` reproduces all of this with no
-data and no PE run.
+**The pool fix is ~90% of the gain.** Censoring adds a small but consistent
++0.008 (all 4 seeds). Multiplicity is neutral on mean AUC though it gives the
+tightest spread (sd 0.0006 vs 0.0021). The geometry/trajectory channel helped in
+simulation but **does not transfer** -- 0.544 alone here, below chance on adult
+(0.496), and it costs ~0.008 when fused. It is off by default.
 
-**To do on the VM, in order:**
+### Protocol change: in/out split
 
-1. `python -m attacks.strong_mia --run_dir <run> ... --self_test` — recomputes the
-   clean histogram over the reconstructed pool and checks it against
-   `PE.CLEAN_HISTOGRAM` cell-for-cell. Passes only on the full pool; fails by
-   construction on the survivor-only pool. This is the proof the defect is real.
-2. `--compare_baseline` on artificial-characters ε=10 for the before/after on one
-   audit set (baseline should reproduce ~0.63).
-3. `--per_group` to re-test finding E. Prediction: per-round SNR of the +1 vote is
-   `1/sqrt(sigma^2 + phi*N*q_j)`, largest where `q_j` is small, so **outlier AUC
-   should rise and may exceed inlier AUC**. If it does, E is a property of the
-   attack's cell-set truncation, not of PE, and §2E/§3.4 need restating.
-4. Seed-average (≥5) before claiming anything; report TPR@1%FPR — TPR@0.1% is below
-   resolution at 1500 non-members.
+These runs use `--inout_split`: deduplicate the private CSV, train PE on a random
+half, use the held-out half as non-members. Two reasons. It removes the train/test
+confound of Exp B/C by construction. And on artificial-characters **72% of test
+rows exactly duplicate a training feature row**; `audit_set.py:67-68` correctly
+drops them, which leaves only 226 usable non-members out of 1533 under the old
+protocol. Absolute AUCs are therefore not comparable to §2A (the §2A-style
+train/test run gives baseline 0.554 -> strong 0.687, +0.133, on those 226).
+
+### Finding E survives -- and my prediction about it was wrong
+
+I predicted that fixing the pool would *raise* outlier AUC, since the per-round SNR
+of the `+1` vote is `1/sqrt(sigma^2 + phi*N*q_j)`, largest where `q_j` is small.
+That is wrong on 3 of 4 datasets. Inlier/outlier AUC (member tertile vs all
+non-members):
+
+| dataset | baseline in / out | strong in / out |
+|---|---|---|
+| artificial-characters (mean of 4) | 0.605 / 0.563 | **0.786 / 0.555** |
+| breast-cancer | 0.515 / 0.624 | 0.748 / 0.432 |
+| adult | 0.604 / 0.527 | 0.530 / **0.594** |
+| person-activity | 0.577 / 0.473 | 0.625 / 0.435 |
+
+The corrected attack lifts *inliers* by ~0.18 and leaves outliers flat, so the gap
+**widens** from 0.04 to 0.23 on artificial-characters. §2E is not an artifact of
+the cell-set truncation; it was understated. adult is the one inversion, and its
+overall signal is the weakest (0.55), exactly the noise §5 warns about.
+
+### Caveats
+
+- Fresh PE runs, not the author's, so absolute AUCs differ from §2 by more than
+  attack seed noise. The **delta on one run** is the trustworthy quantity.
+- Only artificial-characters has 4 seeds; the other three are single runs.
+- adult and person-activity audit sets are capped at 4000/4000 by the sweep.

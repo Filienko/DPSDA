@@ -69,34 +69,35 @@ D_ref records with a comparable ``mu0`` profile (:func:`calibrate_per_example`),
 which is what matters for TPR at low FPR and for comparing inliers against
 outliers on one scale.
 
-Nothing in ``attacks/`` is modified; this module only imports from it. Run
-``--self_test`` first: it recomputes the clean histogram from the private records
-over the reconstructed pool and checks it against ``PE.CLEAN_HISTOGRAM``
-cell-for-cell. That check passes only if the candidate pool is right, and fails by
-construction on the survivor-only pool.
+Nothing in ``attacks/`` is modified; this module only imports from it, so the
+existing numbers stay reproducible and ``--compare_baseline`` scores both attacks
+on one audit set.
 
-Validation on a simulated PE run
---------------------------------
-Against a simulation that reproduces the real loop exactly (per-class histogram,
-uncensored Gaussian noise, sample-then-rank composite population, keep_selected,
-parent pointers), in a regime tuned to look like eps=10 -- ``sigma=1.84`` and a
-``mu0`` near 1.7, which reproduces the survivor-only baseline's reported AUC:
+Validation
+----------
+``--self_test`` reassigns the private records over each pool and compares against
+the released ``PE.CLEAN_HISTOGRAM``. Fraction of private votes landing in the wrong
+cell, on real eps=10 runs: **0 to 1.2e-4 for the full pool, 0.13 to 0.36 for the
+survivor-only pool the baseline uses**. The full-pool residual is nearest-neighbour
+tie-breaking, not a structural error.
 
-    survivor-only count (baseline)   0.559
-    full pool, count                 0.642
-      + censored                     0.661
-      + mult (the discarded rounds)   0.667
-      + traj, flat weight            0.645
-      + traj, router weight          0.662
+Real-run AUC against ``histogram_mia.score_records`` on the identical audit set,
+with a deduplicated in/out membership split (see ``run_pe_for_attack.py``):
 
-So the three likelihood-ratio channels are the win, and they compose. The geometry
-channel is real on its own (0.573 alone, and it reads rounds and records the count
-channel cannot) but does **not** add on top of a correctly specified count channel
--- it is a noisier view of the same evidence, and adding it costs AUC under either
-fusion. It is therefore off by default (``--channels llr``); ``--channels all``
-turns it on, and ``--traj_fuse router`` beats the flat z-sum consistently when it
-is on. The ordering above held in an easier regime too (baseline 0.698 -> 0.870),
-so it is not an artifact of one operating point.
+    artificial-characters (4 seeds)   0.578 +- 0.013  ->  0.672 +- 0.002
+    breast-cancer                     0.588           ->  0.603
+    adult                             0.546           ->  0.567
+    person-activity                   0.518           ->  0.532
+
+Channel attribution on artificial-characters: the pool fix alone is 0.664, censoring
+adds a consistent +0.008 to 0.672, multiplicity is neutral on the mean but gives the
+tightest spread across seeds. The geometry channel is the one that did not transfer
+from simulation -- 0.544 alone, below chance on adult -- and it costs about 0.008
+when fused, so it is off by default (``--channels llr``; ``all`` turns it on, and
+``--traj_fuse router`` beats the flat z-sum whenever it is used).
+
+``python -m attacks.strong_mia_simtest`` exercises all of this against a simulation
+of the PE loop, with no data and no PE run required.
 """
 
 import argparse
@@ -839,6 +840,16 @@ def self_test(checkpoint_folder, embed_fn, priv_rows_by_class, n_private_by_clas
     The same check is run against the baseline's survivor-only pool. It fails there
     by construction -- votes that belong to censored cells have nowhere to go and
     pile up on surviving neighbours -- which is the defect this module fixes.
+
+    The pass criterion is misassigned vote *mass*, ``sum|recomputed - released| /
+    sum(released)``, not bit-exactness. A handful of private records sit on an exact
+    distance tie between two cells, and the generator's backend
+    (``pe/histogram/nearest_neighbor_backend/``) and this ``argmin`` may break that
+    tie differently, moving one vote. Ties are rare in a purely numeric embedding
+    and more common once categoricals are one-hot encoded -- on adult, 0.1% of rows
+    have a nearest-neighbour gap below 1e-5. That produces an error fraction around
+    1e-4, whereas the survivor-only pool misplaces whole percent of the vote mass.
+    ``exact_pass`` keeps the strict all-or-nothing flag.
     """
     report = {}
     for label, only in (("full_pool", False), ("survivors_only", True)):
@@ -847,7 +858,7 @@ def self_test(checkpoint_folder, embed_fn, priv_rows_by_class, n_private_by_clas
                                     max_iters=max_iters, use_clean=True,
                                     survivors_only=only)
         rounds = exact = 0
-        worst = 0.0
+        worst = total_err = total_votes = 0.0
         for cls, iters in by_class.items():
             rows = priv_rows_by_class.get(int(cls))
             if not rows:
@@ -860,15 +871,23 @@ def self_test(checkpoint_folder, embed_fn, priv_rows_by_class, n_private_by_clas
                 recomputed = np.bincount(np.ravel(cells),
                                          minlength=it["cell_features"].shape[0])
                 obs = it["observed"]
-                diff = np.abs(recomputed[obs] - np.nan_to_num(it["counts"][obs]))
+                released = np.nan_to_num(it["counts"][obs])
+                diff = np.abs(recomputed[obs] - released)
                 rounds += 1
                 exact += int(diff.max() == 0)
                 worst = max(worst, float(diff.max()))
+                total_err += float(diff.sum())
+                total_votes += float(released.sum())
+        frac = total_err / total_votes if total_votes > 0 else float("nan")
         report[label] = {
             "rounds_checked": rounds,
             "rounds_exact": exact,
             "max_abs_count_error": worst,
-            "pass": bool(rounds > 0 and exact == rounds),
+            "misassigned_votes": total_err,
+            "total_votes": total_votes,
+            "error_fraction": frac,
+            "exact_pass": bool(rounds > 0 and exact == rounds),
+            "pass": bool(rounds > 0 and frac < 1e-3),
         }
     return report
 

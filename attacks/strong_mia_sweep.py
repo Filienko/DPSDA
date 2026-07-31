@@ -6,7 +6,7 @@ embeds the candidate pools once per run and reuses them across channel
 configurations, which is why this is much faster than looping the
 ``attacks.strong_mia`` CLI.
 
-Writes a single ``attacks/results_strong_mia.json`` so the numbers in
+Writes a single ``attacks/strong_mia_results.json`` so the numbers in
 ``running_summary.md`` are generated rather than transcribed.
 
     python -m attacks.strong_mia_sweep --runs results/tabular/ac_inout ...
@@ -58,7 +58,8 @@ def _per_group(labels, scores, grp):
     return {g: _group_auc(labels, scores, grp, g) for g in ("inlier", "mid", "outlier")}
 
 
-def score_run(run_dir, metadata, members_csv="", nonmembers_csv="", seed=0):
+def score_run(run_dir, metadata, members_csv="", nonmembers_csv="", seed=0,
+              max_audit=5000):
     ckpt = os.path.join(run_dir, "checkpoint")
     m_csv = members_csv or os.path.join(run_dir, "audit_members.csv")
     n_csv = nonmembers_csv or os.path.join(run_dir, "audit_nonmembers.csv")
@@ -70,9 +71,13 @@ def score_run(run_dir, metadata, members_csv="", nonmembers_csv="", seed=0):
     npc = {int(k): int(v) for k, v in
            priv.data_frame[LABEL_ID_COLUMN_NAME].value_counts().items()}
 
-    n_mem = len(priv.data_frame)
+    # Cap the audit set. The geometry channel costs O(records x cells x dim), and
+    # dim blows up once categoricals are one-hot encoded, so the full 16k/57k member
+    # pools of adult and person-activity dominate the whole sweep. A few thousand
+    # challenges already pins AUC far tighter than the seed-to-seed spread.
+    n_mem = min(len(priv.data_frame), max_audit)
     import pandas as pd
-    n_non = len(pd.read_csv(n_csv))
+    n_non = min(len(pd.read_csv(n_csv)), max_audit)
     rows, classes, labels, sizes = build_audit_set(
         m_csv, n_csv, metadata, n_members=n_mem, n_nonmembers=n_non,
         seed=seed, ref_holdout_frac=0.5)
@@ -128,7 +133,9 @@ def main(argv=None):
     p.add_argument("--runs", nargs="+", required=True)
     p.add_argument("--metadata", nargs="+", required=True,
                    help="one metadata path per run, or a single shared one")
-    p.add_argument("--out", default="attacks/results_strong_mia.json")
+    p.add_argument("--out", default="attacks/strong_mia_results.json")
+    p.add_argument("--max_audit", type=int, default=5000,
+                   help="cap on members and on non-members per run")
     args = p.parse_args(argv)
 
     metas = (args.metadata * len(args.runs)) if len(args.metadata) == 1 else args.metadata
@@ -139,7 +146,7 @@ def main(argv=None):
             continue
         print(f"scoring {run} ...")
         try:
-            r = score_run(run, meta)
+            r = score_run(run, meta, max_audit=args.max_audit)
         except Exception as exc:
             print(f"  FAILED: {type(exc).__name__}: {exc}")
             continue
