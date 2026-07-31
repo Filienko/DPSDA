@@ -313,6 +313,20 @@ def llr_multiplicity(c, n_draws, relu_sum, mu0, mu1, sigma, dispersion=1.0,
 # --------------------------------------------------------------------------- #
 # Full-release reconstruction
 # --------------------------------------------------------------------------- #
+def _parent_positions(values, pos_of):
+    """Map a ``PE.PARENT_SYN_DATA_INDEX`` column to positions in the candidate pool.
+
+    Returns -1 for anything unmappable. The NaN guard matters: ``Data.concat``
+    (``pe/population/pe_population.py:179``) unions rows that carry different
+    column sets, so a real frame can hold a NaN parent where the simulation never
+    produced one, and a bare ``int(nan)`` would raise mid-run.
+    """
+    out = np.empty(len(values), dtype=np.int64)
+    for i, v in enumerate(values):
+        out[i] = pos_of.get(int(v), -1) if pd.notna(v) else -1
+    return out
+
+
 def _read_checkpoint(folder, t, cache):
     if t not in cache:
         path = os.path.join(folder, f"{t:09d}", "data_frame.pkl")
@@ -392,8 +406,7 @@ def reconstruct_full(checkpoint_folder, embed_fn, reference_features_by_class,
 
             counts = np.full(n_cand, np.nan, dtype=np.float64)
             if len(surv) and has_parent and count_col in surv.columns:
-                sp = np.array([pos_of.get(int(v), -1)
-                               for v in surv[PARENT_SYN_DATA_INDEX_COLUMN_NAME]], dtype=np.int64)
+                sp = _parent_positions(surv[PARENT_SYN_DATA_INDEX_COLUMN_NAME], pos_of)
                 sv = surv[count_col].to_numpy(dtype=np.float64)
                 ok = sp >= 0
                 counts[sp[ok]] = sv[ok]
@@ -406,8 +419,7 @@ def reconstruct_full(checkpoint_folder, embed_fn, reference_features_by_class,
             child_mult = np.zeros(n_cand, dtype=np.int64)
             n_draws = 0
             if len(kids) and has_parent:
-                kp = np.array([pos_of.get(int(v), -1)
-                               for v in kids[PARENT_SYN_DATA_INDEX_COLUMN_NAME]], dtype=np.int64)
+                kp = _parent_positions(kids[PARENT_SYN_DATA_INDEX_COLUMN_NAME], pos_of)
                 kp = kp[kp >= 0]
                 if kp.size:
                     child_mult = np.bincount(kp, minlength=n_cand).astype(np.int64)
@@ -419,9 +431,8 @@ def reconstruct_full(checkpoint_folder, embed_fn, reference_features_by_class,
             parent_pos = np.full(n_cand, -1, dtype=np.int64)
             back = prev_pos_of.get(cls)
             if back is not None and PARENT_SYN_DATA_INDEX_COLUMN_NAME in pool.columns:
-                parent_pos = np.array(
-                    [back.get(int(v), -1) if pd.notna(v) else -1
-                     for v in pool[PARENT_SYN_DATA_INDEX_COLUMN_NAME]], dtype=np.int64)
+                parent_pos = _parent_positions(
+                    pool[PARENT_SYN_DATA_INDEX_COLUMN_NAME], back)
 
             if survivors_only:
                 if not observed.any():
