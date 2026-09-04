@@ -48,8 +48,8 @@ from pe.constant.data import TABULAR_DATA_COLUMN_NAME, LABEL_ID_COLUMN_NAME, VAR
 ROOT = "results/tabular"
 OUT = f"{ROOT}/_utility_logs/utility_summary.json"
 BASE = "https://raw.githubusercontent.com/toan-vt/cloud-data-store/refs/heads/main/tabular/real"
-DATASETS = ["artificial-characters", "person-activity"]
-DEGREE = 5
+DATASETS = ["adult", "breast-cancer"]
+DEGREE = 2
 N_SUB = 1000
 SEED = 0
 
